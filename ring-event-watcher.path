@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Ring Events inbox for new ZIPs
+
+[Path]
+PathChanged=/home/bostock/ring_events/inbox
+Unit=ring-event-processor.service
+
+[Install]
+WantedBy=multi-user.target

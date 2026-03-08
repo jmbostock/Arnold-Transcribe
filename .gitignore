@@ -1,0 +1,9 @@
+inbox/
+working/
+processed/
+*.log
+run.log
+events.log
+next-session-briefing.md
+__pycache__/
+*.pyc

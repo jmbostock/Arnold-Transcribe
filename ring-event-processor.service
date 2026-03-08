@@ -1,0 +1,11 @@
+[Unit]
+Description=Process new Ring Event ZIP files
+After=network.target docker.service
+
+[Service]
+Type=oneshot
+User=bostock
+WorkingDirectory=/home/bostock/ring_events
+ExecStart=/home/bostock/ring_events/run_event.sh
+StandardOutput=append:/home/bostock/ring_events/events.log
+StandardError=append:/home/bostock/ring_events/events.log
