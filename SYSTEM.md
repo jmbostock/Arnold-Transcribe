@@ -17,15 +17,15 @@ inbox/Ring_YYYYMMDD_HHMM.zip
     ↓  docker exec n8n unzip
 working/YYYYMMDD_HHMM/*.mp4
     ↓  process_event.py
-    ↓  ffmpeg (inside n8n container) — noise-filtered WAV
+    ↓  ffmpeg (inside n8n container) — noise-filtered WAV (outdoor/indoor aware)
     ↓  HTTP POST
 Whisper API ←→ 10.0.1.202:9876 (GPU: RTX 5060 16GB, large-v3)
-    ↓  transcript per clip
-Claude Haiku API ←→ api.anthropic.com
-    ↓  structured JSON analysis
+    ↓  transcript per clip (camera-aware initial_prompt, VAD, beam=10, best_of=5)
+Claude Sonnet 4.6 API ←→ api.anthropic.com
+    ↓  structured JSON: summary, exact quotes, per-camera breakdown
 processed/YYYYMMDD_HHMM/
     ├── event.json
-    └── transcript.txt
+    └── transcript.txt  (exact quotes + file paths for navigation)
     ↓  HTTP POST
 OpenWebUI "Ring Events" knowledge collection ←→ 10.0.1.32:3000
     ↓  queryable via
@@ -65,6 +65,39 @@ tail -f ~/ring_events/events.log
 
 ---
 
+## Camera Name Mapping
+
+Ring export filenames contain only a UUID — no human-readable camera name.
+`camera_names.json` maps the first 8 chars of each UUID to a friendly name.
+
+### Setup
+
+1. **Discover UUIDs** from existing events:
+   ```bash
+   python3 list_cameras.py /home/bostock/ring_events/processed/
+   ```
+   This prints a table of UUID prefixes with clip counts and a JSON snippet to paste.
+
+2. **Edit `camera_names.json`** with your friendly names:
+   ```json
+   {
+     "dab532e6": "Front Door",
+     "abc12345": "Driveway",
+     "def67890": "Backyard",
+     "f1a2b3c4": "Side Gate",
+     "_outdoor_cameras": ["Front Door", "Driveway", "Backyard", "Side Gate"]
+   }
+   ```
+   `_outdoor_cameras` controls which cameras get the aggressive outdoor noise-reduction
+   filter chain. If the list is empty or absent, all cameras are treated as outdoor.
+
+3. Copy `camera_names.json` to the server:
+   ```bash
+   scp camera_names.json bostock@10.0.1.176:/home/bostock/ring_events/camera_names.json
+   ```
+
+---
+
 ## Services
 
 ### n8n (10.0.1.176)
@@ -85,7 +118,8 @@ docker logs n8n -f
 - **Path**: `/home/bostock/whisper-server/server.py`
 - **URL**: http://10.0.1.202:9876
 - **Model**: large-v3, CUDA, float32
-- **Settings**: beam_size=10, vad_filter=True, best_of=5, temperature=0.0
+- **Parameters sent per clip**: beam_size=10, best_of=5, temperature=0.0, vad_filter=true
+- **initial_prompt**: camera-location-aware (Front Door / Driveway / Backyard / Side Gate / generic outdoor)
 
 ```bash
 # Check
@@ -102,7 +136,7 @@ nohup ~/.local/bin/uvicorn server:app --host 0.0.0.0 --port 9876 > ~/whisper-ser
 - **Model**: "Arnold Transcribe" — Claude Sonnet 4.6, RAG over Ring Events collection
 - **Knowledge collection**: "Ring Events" (ID: `edc64ab9-c92a-4230-9b37-727cba8d3610`)
 - **Note**: OWUI auth tokens are session-based (expire). `run_event.sh` re-authenticates each run.
-- **Timezone**: Transcript timestamps are UTC; property is Pacific Time. System prompt converts automatically.
+- **Timezone**: Transcript timestamps are Pacific Time (converted from UTC).
 
 ---
 
@@ -115,10 +149,12 @@ nohup ~/.local/bin/uvicorn server:app --host 0.0.0.0 --port 9876 > ~/whisper-ser
 │   └── YYYYMMDD_HHMM/   ← extracted MP4s (temp)
 ├── processed/
 │   └── YYYYMMDD_HHMM/
-│       ├── event.json
-│       ├── transcript.txt
+│       ├── event.json          ← full structured data
+│       ├── transcript.txt      ← navigable transcript for OpenWebUI
 │       └── Ring_YYYYMMDD_HHMM.zip  ← archived source
 ├── process_event.py      ← pipeline script
+├── list_cameras.py       ← discover UUID→name mappings from existing events
+├── camera_names.json     ← UUID prefix → friendly camera name mapping
 ├── run_event.sh          ← called by systemd, orchestrates full run
 ├── ring-event-watcher.path      ← systemd path unit (copy to /etc/systemd/system/)
 ├── ring-event-processor.service ← systemd service unit
@@ -137,15 +173,29 @@ Container mount: `/home/bostock/ring_events` → `/data/ring_events` inside n8n.
   "event_id": "20260307_2205",
   "event_timestamp": "2026-03-07T22:05:00",
   "processed_at": "...",
-  "cameras_triggered": ["Clip_dab532e6", "..."],
+  "cameras_triggered": ["Front Door", "Driveway"],
   "clip_count": 39,
   "total_audio_seconds": 2102,
   "analysis": {
-    "summary": "...",
+    "summary": "3-5 sentence description of the full event...",
     "persons_detected": 4,
     "activity_type": "visitor",
     "sentiment": "routine",
-    "key_moments": ["..."],
+    "per_camera_activity": {
+      "Front Door": "Resident greeted a visitor at the door...",
+      "Driveway": "A vehicle pulled in and parked..."
+    },
+    "exact_quotes": [
+      {
+        "quote": "verbatim text from transcript",
+        "timestamp": "22:05",
+        "camera": "Front Door",
+        "context": "Resident speaking to visitor"
+      }
+    ],
+    "key_moments": [
+      "[22:05 | Front Door] Visitor rang doorbell and was greeted by resident"
+    ],
     "recommendations": "..."
   },
   "combined_transcript": "...",
@@ -154,25 +204,52 @@ Container mount: `/home/bostock/ring_events` → `/data/ring_events` inside n8n.
 ```
 
 ### transcript.txt
-Human-readable: event header, AI summary, then timestamped transcript per clip.
+Rich human-readable format uploaded to OpenWebUI:
+- **Header**: event ID, timestamps, file system path (`processed/YYYYMMDD_HHMM/event.json`)
+- **Summary**: 3-5 sentence AI summary
+- **Per-Camera Activity**: what each named camera captured
+- **Exact Quotes**: verbatim text with timestamp + camera name
+- **Key Moments**: bulleted timeline
+- **Full Transcript**: all clips with `[TIME | CAMERA NAME | CLIP FILENAME]` headers
+
+This means an OpenWebUI RAG result will always tell you the clip filename and
+camera that produced the quote — you can go directly to the source video.
 
 ---
 
 ## Timestamps
 
-All clip timestamps are **UTC**. The property is in **Pacific Time (UTC-8 PST / UTC-7 PDT)**. Arnold Transcribe converts automatically.
+All clip timestamps from Ring filenames are **UTC**. Arnold Transcribe converts to **Pacific Time (UTC-8 PST / UTC-7 PDT)** automatically. All output timestamps are Pacific Time.
 
 ---
 
 ## Audio Pipeline
 
-**ffmpeg filter chain** (noise reduction for outdoor Ring cameras):
-- `highpass=f=200` — removes wind/rumble
-- `lowpass=f=8000` — cuts noise above speech range
-- `afftdn=nf=-20` — FFT noise reduction
-- `dynaudnorm=g=5` — normalizes volume
+**Outdoor cameras** (listed in `_outdoor_cameras` in `camera_names.json`):
+```
+highpass=f=200       — removes wind / low-frequency rumble
+lowpass=f=8000       — caps above usable speech range
+afftdn=nf=-25        — FFT noise reduction (stronger than default)
+agate=threshold=...  — noise gate: suppresses background between speech
+dynaudnorm=g=5       — normalizes volume so quiet speech is audible
+```
+
+**Indoor cameras** (not in outdoor list):
+```
+afftdn=nf=-15        — lighter noise reduction
+dynaudnorm=g=5       — volume normalization
+```
 
 Output: 16kHz mono PCM WAV → Whisper large-v3.
+
+---
+
+## Analysis Model
+
+**Claude Sonnet 4.6** (`claude-sonnet-4-6`) — quality-first choice.
+- No transcript truncation — full event analyzed regardless of length
+- max_tokens: 4096 — room for thorough structured output
+- Extracts verbatim exact quotes, per-camera breakdown, 3-5 sentence summaries
 
 ---
 
@@ -191,7 +268,7 @@ python3 process_event.py working/YYYYMMDD_HHMM --event-id YYYYMMDD_HHMM
 
 ## Known Issues
 
-- Ring filenames: `Ring_YYYYMMDD_HHMM_UUID.mp4` — no camera name; IDs are first 8 chars of UUID
+- Ring filenames contain device UUIDs, not camera names — configure `camera_names.json` to resolve friendly names
 - Whisper server is not managed by systemd — restart manually after reboots on 10.0.1.202
 - ffmpeg and unzip are only inside the n8n Docker container, not the host
 - OpenWebUI OWUI tokens expire; `run_event.sh` re-authenticates on each run

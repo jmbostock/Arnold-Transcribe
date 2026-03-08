@@ -1,0 +1,15 @@
+{
+  "_instructions": "Map the first 8 characters of each Ring clip UUID to a friendly camera name. Run 'python3 list_cameras.py processed/' to discover your UUIDs from existing events.",
+  "_example": {
+    "dab532e6": "Front Door",
+    "abc12345": "Driveway",
+    "def67890": "Backyard",
+    "f1a2b3c4": "Side Gate"
+  },
+  "_outdoor_cameras": [
+    "Driveway",
+    "Backyard",
+    "Side Gate",
+    "Front Door"
+  ]
+}
