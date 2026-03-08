@@ -5,7 +5,14 @@ Usage: python3 process_event.py <work_dir> [--event-id EVENT_ID]
 """
 import os, sys, json, subprocess, requests, re, shutil
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+PST = timezone(timedelta(hours=-8))
+
+def to_pst(date_str, time_str):
+    dt = datetime(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:8]),
+                  int(time_str[:2]), int(time_str[2:]), tzinfo=timezone.utc)
+    return dt.astimezone(PST).strftime('%Y-%m-%dT%H:%M:%S')
 
 WHISPER_URL = os.environ.get('WHISPER_URL', 'http://10.0.1.202:9876')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -106,8 +113,7 @@ def process_event(work_dir, event_id=None):
         print(f"  [{i+1}/{len(mp4_files)}] {mp4.name}", flush=True)
 
         m = re.match(r'Ring_(\d{8})_(\d{4})_([a-f0-9-]+)\.mp4', mp4.name, re.I)
-        clip_ts = (f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]}"
-                   f"T{m.group(2)[:2]}:{m.group(2)[2:]}:00") if m else ''
+        clip_ts = to_pst(m.group(1), m.group(2)) if m else ''
         clip_id = m.group(3)[:8] if m else mp4.stem
 
         if not wav.exists():
